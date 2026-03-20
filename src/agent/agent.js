@@ -16,6 +16,7 @@ import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
+import { validateNameFormat, handleDisconnection } from './connection_handler.js';
 import { RAGManager } from './rag/rag_manager.js';
 import { BrainAgent } from './agents/brain.js';
 import { RPAgent } from './agents/rp.js';
@@ -29,12 +30,21 @@ export class Agent {
     async start(load_mem = false, init_message = null, count_id = 0) {
         this.last_sender = null;
         this.count_id = count_id;
+        this._disconnectHandled = false;
 
         this.actions = new ActionManager(this);
         this.prompter = new Prompter(this, settings.profile);
-        this.name = this.prompter.getName();
+        this.name = (this.prompter.getName() || '').trim();
         this.rag = new RAGManager(this);
         log.info(`Starting ${this.name}...`);
+
+        // Validate name format before connecting
+        const nameCheck = validateNameFormat(this.name);
+        if (!nameCheck.success) {
+            log.error(nameCheck.msg);
+            process.exit(1);
+            return;
+        }
         this.history = new History(this);
         this.coder = new Coder(this);
         this.npc = new NPCContoller(this);
@@ -68,6 +78,23 @@ export class Agent {
 
         log.info(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+
+        // Early connection error handler (before spawn)
+        const onDisconnect = (event, reason) => {
+            if (this._disconnectHandled) return;
+            this._disconnectHandled = true;
+            const { msg } = handleDisconnection(this.name, reason);
+            process.exit(1);
+        };
+        this.bot.once('kicked', (reason) => onDisconnect('Kicked', reason));
+        this.bot.once('end', (reason) => onDisconnect('Disconnected', reason));
+        this.bot.on('error', (err) => {
+            if (String(err).includes('Duplicate') || String(err).includes('ECONNREFUSED')) {
+                onDisconnect('Error', err);
+            } else {
+                log.error(`[LoginGuard] Connection Error: ${String(err)}`);
+            }
+        });
 
         initModes(this);
 
@@ -542,16 +569,20 @@ export class Agent {
             log.error('Error event!', err);
         });
         this.bot.on('end', (reason) => {
-            log.warn('Bot disconnected! Killing agent process.', reason)
-            this.cleanKill('Bot disconnected! Killing agent process.');
+            if (!this._disconnectHandled) {
+                const { msg } = handleDisconnection(this.name, reason);
+                this.cleanKill(msg);
+            }
         });
         this.bot.on('death', () => {
             this.actions.cancelResume();
             this.actions.stop();
         });
         this.bot.on('kicked', (reason) => {
-            log.warn('Bot kicked!', reason);
-            this.cleanKill('Bot kicked! Killing agent process.');
+            if (!this._disconnectHandled) {
+                const { msg } = handleDisconnection(this.name, reason);
+                this.cleanKill(msg);
+            }
         });
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
             if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {

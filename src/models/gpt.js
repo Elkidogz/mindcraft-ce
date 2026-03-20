@@ -8,6 +8,7 @@ export class GPT {
     constructor(model_name, url, params) {
         this.model_name = model_name;
         this.params = params;
+        this.url = url; // store so that we know whether a custom URL has been set
 
         let config = {};
         if (url)
@@ -22,42 +23,65 @@ export class GPT {
     }
 
     async sendRequest(turns, systemMessage, tools = [], responseFormat = responseFormatSchema) {
-        let stop_seq='***';
-        let messages = strictFormat(turns);
-        messages = messages.map(message => {
-            message.content += stop_seq;
-            return message;
-        });
+        let stop_seq = '***';
         let model = this.model_name || "gpt-4o-mini";
 
         let res = null;
         let function_calls = [];
 
         try {
-            console.log('Awaiting openai api response from model', model)
-            const response = await this.openai.responses.create({
-                model: model,
-                instructions: systemMessage,
-                input: messages,
-                tools: tools,
-                text: { format: responseFormat },
-                ...(this.params || {})
-            });
-            console.log('Received.')
-            res = response.output_text;
-            let stop_seq_index = res.indexOf(stop_seq);
-            res = stop_seq_index !== -1 ? res.slice(0, stop_seq_index) : res;
-            for (const tool_call of response.tool_calls || []) {
-                function_calls.push({
-                    name: tool_call.function.name,
-                    arguments: tool_call.function.arguments
+            console.log('Awaiting openai api response from model', model);
+            // if a custom URL is set, use chat.completions
+            // because custom "OpenAI-compatible" endpoints likely do not have responses endpoint
+            if (this.url) {
+                let messages = [{'role': 'system', 'content': systemMessage}].concat(turns);
+                messages = strictFormat(messages);
+                const pack = {
+                    model: model,
+                    messages,
+                    stop: stop_seq,
+                    ...(this.params || {})
+                };
+                if (model.includes('o1') || model.includes('o3') || model.includes('5')) {
+                    delete pack.stop;
+                }
+                let completion = await this.openai.chat.completions.create(pack);
+                if (completion.choices[0].finish_reason == 'length')
+                    throw new Error('Context length exceeded');
+                console.log('Received.');
+                res = completion.choices[0].message.content;
+            }
+            // otherwise, use responses endpoint with tools and responseFormat
+            else {
+                let messages = strictFormat(turns);
+                messages = messages.map(message => {
+                    message.content += stop_seq;
+                    return message;
                 });
+                const response = await this.openai.responses.create({
+                    model: model,
+                    instructions: systemMessage,
+                    input: messages,
+                    tools: tools,
+                    text: { format: responseFormat },
+                    ...(this.params || {})
+                });
+                console.log('Received.');
+                res = response.output_text;
+                let stop_seq_index = res.indexOf(stop_seq);
+                res = stop_seq_index !== -1 ? res.slice(0, stop_seq_index) : res;
+                for (const tool_call of response.tool_calls || []) {
+                    function_calls.push({
+                        name: tool_call.function.name,
+                        arguments: tool_call.function.arguments
+                    });
+                }
             }
         }
         catch (err) {
             if ((err.message == 'Context length exceeded' || err.code == 'context_length_exceeded') && turns.length > 1) {
                 console.log('Context length exceeded, trying again with shorter context.');
-                return await this.sendRequest(turns.slice(1), systemMessage, stop_seq);
+                return await this.sendRequest(turns.slice(1), systemMessage, tools, responseFormat);
             } else if (err.message.includes('image_url')) {
                 console.log(err);
                 res = 'Vision is only supported by certain models.';

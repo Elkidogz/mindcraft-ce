@@ -47,7 +47,7 @@ export class ReplicateAPI {
 			res = 'My brain disconnected, try again.';
 		}
 		console.log('Received.');
-		return res;
+		return [res, []];
 	}
 
 	async embed(text) {

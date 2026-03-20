@@ -125,7 +125,7 @@ export class Gemini {
             }
         }
 
-        return res, function_calls;
+        return [res, function_calls];
     }
 
     async embed(text) {
